@@ -1,0 +1,7 @@
+{
+  "name": "RotaInteligente AI",
+  "description": "Smart route planning system using Gemini AI to optimize multi-stop deliveries based on CEPs.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
