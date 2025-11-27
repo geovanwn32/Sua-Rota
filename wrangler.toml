@@ -1,0 +1,6 @@
+# wrangler.toml
+name = "rota"
+compatibility_date = "2025-11-27"
+
+[assets]
+directory = "dist"
