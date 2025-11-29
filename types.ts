@@ -35,3 +35,11 @@ export interface Coordinate {
     sortedIds: string[];
     reasoning: string;
   }
+
+  export interface User {
+    id: string;
+    name: string;
+    email: string;
+    picture?: string;
+    password?: string; // In a real app, this would be hashed. Storing raw for local demo.
+  }

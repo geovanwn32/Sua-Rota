@@ -1,13 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { fetchAddressByCep, fetchCoordinates, getCurrentPosition } from './services/geoService';
 import { optimizeRoute } from './services/geminiService';
 import { fetchRouteDetails, formatDistance, formatDuration } from './services/routingService';
-import { Destination, RouteStatus, AddressData } from './types';
+import { authService } from './services/authService';
+import { Destination, RouteStatus, AddressData, User } from './types';
 import RouteVisualizer from './components/RouteVisualizer';
 import AddressCard from './components/AddressCard';
 import Modal from './components/Modal';
+import LoginScreen from './components/LoginScreen';
 
 const App: React.FC = () => {
+  // User State
+  const [user, setUser] = useState<User | null>(null);
+
   const [cepInput, setCepInput] = useState('');
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
@@ -20,12 +25,17 @@ const App: React.FC = () => {
   const [totalDistance, setTotalDistance] = useState(0);
   const [totalTime, setTotalTime] = useState(0);
 
+  // Ref to track if destinations loaded initially to avoid overwriting with empty array
+  const isDataLoadedRef = useRef(false);
+
   // Localização Inicial
   useEffect(() => {
-    getCurrentPosition()
-      .then(pos => setCurrentLocation(pos))
-      .catch(err => console.warn("Acesso à localização negado ou indisponível", err));
-  }, []);
+    if (user) {
+        getCurrentPosition()
+        .then(pos => setCurrentLocation(pos))
+        .catch(err => console.warn("Acesso à localização negado ou indisponível", err));
+    }
+  }, [user]);
 
   // Recalcular totais sempre que os destinos mudarem
   useEffect(() => {
@@ -35,42 +45,107 @@ const App: React.FC = () => {
     setTotalTime(time);
   }, [destinations]);
 
+  // Persistence Effect: Save data whenever it changes, ONLY if user is logged in
+  useEffect(() => {
+    if (user && isDataLoadedRef.current) {
+        authService.saveUserData(user.id, destinations);
+    }
+  }, [destinations, user]);
+
+  const handleLogin = (userData: User) => {
+    setUser(userData);
+    // Load User Data
+    const savedDestinations = authService.loadUserData(userData.id);
+    setDestinations(savedDestinations);
+    isDataLoadedRef.current = true;
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setDestinations([]);
+    setCepInput('');
+    setAiReasoning(null);
+    isDataLoadedRef.current = false;
+  };
+
   const handleAddCep = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (cepInput.length < 8) return;
+    if (!cepInput.trim()) return;
 
     setLoading(true);
-    const address = await fetchAddressByCep(cepInput);
-    
-    if (address) {
-      // Buscar coordenadas para visualização no mapa
-      const coords = await fetchCoordinates(address);
-      
-      // Se não achou coordenadas, usa 0,0 temporariamente ou avisa, mas o geoService robusto deve achar algo
-      const addressWithCoords: AddressData = {
-          ...address,
-          lat: coords?.lat,
-          lng: coords?.lng
-      };
 
-      const newDest: Destination = {
-        id: crypto.randomUUID(),
-        cep: address.cep,
-        address: addressWithCoords,
-        status: RouteStatus.PENDING,
-        order: destinations.length,
-        notes: '' 
-      };
+    // 1. Parse input: Split por vírgula, ponto e vírgula ou nova linha
+    const rawInputs = cepInput.split(/[\n,;]+/);
+    const validCeps: string[] = [];
 
-      // Adicionar à lista
-      setDestinations(prev => [...prev, newDest]);
-      
-      // Popup imediato para validar localização visualmente
-      setSelectedDestination(newDest);
-      setCepInput('');
-    } else {
-      alert("CEP não encontrado.");
+    // 2. Extrair CEPs válidos (apenas números, 8 dígitos)
+    for (const raw of rawInputs) {
+        const clean = raw.replace(/\D/g, '');
+        if (clean.length === 8) {
+            validCeps.push(clean);
+        }
     }
+
+    if (validCeps.length === 0) {
+        alert("Nenhum CEP válido encontrado (8 dígitos).");
+        setLoading(false);
+        return;
+    }
+
+    let addedCount = 0;
+    const newDestinations: Destination[] = [];
+
+    // 3. Processar sequencialmente para não sobrecarregar as APIs (Rate Limiting)
+    for (const cep of validCeps) {
+        // Pequena verificação de duplicidade simples (pode ser removida se quiser permitir duplicatas)
+        const exists = destinations.some(d => d.cep.replace(/\D/g, '') === cep) || 
+                       newDestinations.some(d => d.cep.replace(/\D/g, '') === cep);
+        
+        // Opcional: Descomente para bloquear duplicatas
+        // if (exists) continue; 
+
+        const address = await fetchAddressByCep(cep);
+        
+        if (address) {
+            const coords = await fetchCoordinates(address);
+            
+            const addressWithCoords: AddressData = {
+                ...address,
+                lat: coords?.lat,
+                lng: coords?.lng
+            };
+
+            const newDest: Destination = {
+                id: crypto.randomUUID(),
+                cep: address.cep,
+                address: addressWithCoords,
+                status: RouteStatus.PENDING,
+                order: destinations.length + addedCount,
+                notes: '' 
+            };
+
+            newDestinations.push(newDest);
+            addedCount++;
+        }
+    }
+
+    if (newDestinations.length > 0) {
+        setDestinations(prev => [...prev, ...newDestinations]);
+        setCepInput('');
+
+        // UX Inteligente:
+        // Se adicionou apenas 1, foca nele (abre popup).
+        // Se adicionou vários, apenas notifica para não poluir a tela.
+        if (newDestinations.length === 1) {
+            setSelectedDestination(newDestinations[0]);
+        } else {
+            // Pequeno feedback visual ou via alert para lote
+            // alert(`${addedCount} endereços adicionados com sucesso!`);
+        }
+    } else {
+        alert("Não foi possível encontrar endereços para os CEPs informados.");
+    }
+    
     setLoading(false);
   };
 
@@ -165,21 +240,47 @@ const App: React.FC = () => {
     window.open(url, '_blank');
   };
 
+  // Render Login Screen if not authenticated
+  if (!user) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
   return (
     <div className="min-h-screen flex flex-col md:flex-row font-sans">
       
       {/* Barra Lateral / Controles */}
       <div className="w-full md:w-96 bg-white border-r border-slate-200 flex flex-col h-screen overflow-hidden z-20 shadow-xl">
         <div className="p-6 bg-slate-900 text-white">
-          <h1 className="text-xl font-bold flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-blue-400">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
-            </svg>
-            Rota Inteligente
-          </h1>
-          <p className="text-slate-400 text-xs mt-1">Planejador Logístico via Gemini AI</p>
+          <div className="flex justify-between items-start">
+             <h1 className="text-xl font-bold flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-blue-400">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                </svg>
+                Rota Inteligente
+            </h1>
+            <button onClick={handleLogout} className="text-slate-400 hover:text-white transition-colors" title="Sair">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+                </svg>
+            </button>
+          </div>
           
+          {/* User Profile Info */}
+          <div className="flex items-center gap-3 mt-4 p-2 bg-slate-800/50 rounded-lg border border-slate-700">
+             <div className="w-8 h-8 rounded-full bg-blue-500 overflow-hidden flex-shrink-0 flex items-center justify-center text-white font-bold">
+                {user.picture ? (
+                    <img src={user.picture} alt={user.name} className="w-full h-full object-cover" />
+                ) : (
+                    user.name.charAt(0).toUpperCase()
+                )}
+             </div>
+             <div className="overflow-hidden">
+                <p className="text-sm font-medium text-white truncate">{user.name}</p>
+                <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
+             </div>
+          </div>
+
           {(totalDistance > 0 || totalTime > 0) && (
               <div className="mt-4 grid grid-cols-2 gap-2">
                   <div className="bg-slate-800 p-2 rounded-lg">
@@ -196,26 +297,21 @@ const App: React.FC = () => {
 
         <div className="p-4 border-b border-slate-100 bg-slate-50">
           <label className="block text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wide">
-            Adicionar Novo Ponto (CEP)
+            Adicionar Pontos (CEPs)
           </label>
           <form onSubmit={handleAddCep} className="relative">
-            <input
-              type="text"
+            <textarea
               value={cepInput}
-              onChange={(e) => {
-                  let val = e.target.value.replace(/\D/g, '');
-                  if (val.length > 5) val = val.slice(0, 5) + '-' + val.slice(5, 8);
-                  setCepInput(val);
-              }}
-              placeholder="Digite o CEP (00000-000)"
-              maxLength={9}
-              className="w-full pl-4 pr-12 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all shadow-sm"
+              onChange={(e) => setCepInput(e.target.value)}
+              placeholder="Digite os CEPs separados por enter ou vírgula..."
+              rows={3}
+              className="w-full pl-3 pr-10 py-2 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all shadow-sm text-sm resize-y min-h-[50px] max-h-[120px]"
             />
             <button 
                 type="submit" 
-                disabled={loading || cepInput.length < 9}
-                className="absolute right-2 top-2 p-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                title="Buscar CEP"
+                disabled={loading || !cepInput.trim()}
+                className="absolute right-2 bottom-2 p-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                title="Adicionar Endereços"
             >
                 {loading ? (
                     <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
