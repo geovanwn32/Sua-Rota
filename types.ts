@@ -19,20 +19,41 @@ export interface Coordinate {
     lng?: number;
   }
   
+  export interface ProofOfDelivery {
+    receiverName: string;
+    timestamp: number;
+    photoUrl?: string; // Base64 or URL
+  }
+
+  export interface TimeWindow {
+    start: string; // "09:00"
+    end: string;   // "18:00"
+  }
+
   export interface Destination {
     id: string;
     cep: string;
     address: AddressData;
     status: RouteStatus;
-    order: number; // For optimized sorting
+    order: number;
     notes?: string;
-    travelDistance?: number; // em metros (driving distance)
-    travelDuration?: number; // em segundos (driving time)
-    geometry?: any; // GeoJSON geometry for the route leg to this destination
+    travelDistance?: number; // metros
+    travelDuration?: number; // segundos
+    geometry?: any;
+    
+    // Novos Campos Enterprise
+    vehicleId?: string; // "Veículo 1", "Moto A"
+    timeWindow?: TimeWindow;
+    proofOfDelivery?: ProofOfDelivery;
   }
   
+  export interface OptimizedRouteAssignment {
+    vehicleId: string;
+    stopIds: string[]; // Ordered IDs for this vehicle
+  }
+
   export interface OptimizationResult {
-    sortedIds: string[];
+    assignments: OptimizedRouteAssignment[];
     reasoning: string;
   }
 
@@ -41,5 +62,5 @@ export interface Coordinate {
     name: string;
     email: string;
     picture?: string;
-    password?: string; // In a real app, this would be hashed. Storing raw for local demo.
+    password?: string;
   }

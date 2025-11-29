@@ -25,44 +25,69 @@ const RouteVisualizer: React.FC<RouteVisualizerProps> = ({ destinations, current
 
   // Initialize map only once on mount
   useEffect(() => {
-    if (!mapContainerRef.current || mapInstanceRef.current) return;
+    // Se o container não existe, aborta
+    if (!mapContainerRef.current) return;
 
-    // Default view: Center of Brazil to start
+    // Se o mapa já existe, não recria (evita erro "Map is already initialized")
+    if (mapInstanceRef.current) return;
+
+    // Centro do Brasil
     const defaultLat = -14.2350;
     const defaultLng = -51.9253;
     const defaultZoom = 4;
     
-    const map = L.map(mapContainerRef.current, {
-        zoomControl: false 
-    }).setView([defaultLat, defaultLng], defaultZoom);
+    // Limites aproximados da América do Sul para evitar que o usuário se perca no oceano
+    const southWest = L.latLng(-60, -90);
+    const northEast = L.latLng(15, -30);
+    const bounds = L.latLngBounds(southWest, northEast);
 
-    // Initial Base Layer (OSM)
-    baseLayerRef.current = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors',
-      maxZoom: 19
-    }).addTo(map);
+    try {
+        const map = L.map(mapContainerRef.current, {
+            zoomControl: false,
+            minZoom: 3,
+            maxBounds: bounds,
+            maxBoundsViscosity: 1.0 // Impede arrastar para fora totalmente
+        }).setView([defaultLat, defaultLng], defaultZoom);
 
-    // Traffic Layer Init
-    trafficLayerRef.current = L.tileLayer('https://mt0.google.com/vt?lyrs=h@159000000,traffic|seconds_into_week:-1&style=3&x={x}&y={y}&z={z}', {
-        maxZoom: 20,
-        opacity: 0.8,
-        pane: 'overlayPane', 
-        zIndex: 10
-    });
+        // Initial Base Layer (OSM) - Clean Style
+        baseLayerRef.current = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors',
+            maxZoom: 19
+        }).addTo(map);
 
-    L.control.zoom({ position: 'bottomright' }).addTo(map);
+        // Traffic Layer Init
+        trafficLayerRef.current = L.tileLayer('https://mt0.google.com/vt?lyrs=h@159000000,traffic|seconds_into_week:-1&style=3&x={x}&y={y}&z={z}', {
+            maxZoom: 20,
+            opacity: 0.8,
+            pane: 'overlayPane', 
+            zIndex: 10
+        });
 
-    // Create groups
-    routeLayerRef.current = L.layerGroup().addTo(map); // Routes at bottom
-    layerGroupRef.current = L.layerGroup().addTo(map); // Markers on top
-    
-    mapInstanceRef.current = map;
-    setIsMapReady(true);
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
 
+        // Create groups
+        routeLayerRef.current = L.layerGroup().addTo(map); // Routes at bottom
+        layerGroupRef.current = L.layerGroup().addTo(map); // Markers on top
+        
+        mapInstanceRef.current = map;
+        setIsMapReady(true);
+
+        // Fix Crítico: Forçar atualização do tamanho do mapa após renderização
+        // Isso resolve o problema de "mapa cinza" ou incompleto
+        setTimeout(() => {
+            map.invalidateSize();
+        }, 200);
+
+    } catch (error) {
+        console.error("Erro ao inicializar o mapa:", error);
+    }
+
+    // Cleanup function
     return () => {
         if (mapInstanceRef.current) {
             mapInstanceRef.current.remove();
             mapInstanceRef.current = null;
+            setIsMapReady(false);
         }
     };
   }, []);
@@ -71,31 +96,39 @@ const RouteVisualizer: React.FC<RouteVisualizerProps> = ({ destinations, current
   useEffect(() => {
     if (!mapInstanceRef.current || !baseLayerRef.current) return;
 
-    mapInstanceRef.current.removeLayer(baseLayerRef.current);
+    try {
+        mapInstanceRef.current.removeLayer(baseLayerRef.current);
 
-    if (mapType === 'standard') {
-        baseLayerRef.current = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; OpenStreetMap contributors',
-            maxZoom: 19
-        });
-    } else {
-        baseLayerRef.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Esri',
-            maxZoom: 19
-        });
+        if (mapType === 'standard') {
+            baseLayerRef.current = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; OpenStreetMap contributors',
+                maxZoom: 19
+            });
+        } else {
+            baseLayerRef.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Esri',
+                maxZoom: 19
+            });
+        }
+
+        mapInstanceRef.current.addLayer(baseLayerRef.current);
+        baseLayerRef.current.bringToBack();
+    } catch (e) {
+        console.warn("Erro ao trocar camada:", e);
     }
-
-    mapInstanceRef.current.addLayer(baseLayerRef.current);
-    baseLayerRef.current.bringToBack();
   }, [mapType, isMapReady]);
 
   // Handle Traffic Layer
   useEffect(() => {
     if (!mapInstanceRef.current || !trafficLayerRef.current) return;
-    if (showTraffic) {
-        mapInstanceRef.current.addLayer(trafficLayerRef.current);
-    } else {
-        mapInstanceRef.current.removeLayer(trafficLayerRef.current);
+    try {
+        if (showTraffic) {
+            mapInstanceRef.current.addLayer(trafficLayerRef.current);
+        } else {
+            mapInstanceRef.current.removeLayer(trafficLayerRef.current);
+        }
+    } catch (e) {
+        console.warn("Erro ao alternar tráfego:", e);
     }
   }, [showTraffic, isMapReady]);
 
@@ -109,7 +142,7 @@ const RouteVisualizer: React.FC<RouteVisualizerProps> = ({ destinations, current
     const points: Array<{lat: number, lng: number}> = [];
 
     // 1. Add Current Location Marker
-    if (currentLocation) {
+    if (currentLocation && currentLocation.lat && currentLocation.lng) {
         const startIcon = L.divIcon({
             className: 'custom-div-icon',
             html: `
@@ -130,8 +163,8 @@ const RouteVisualizer: React.FC<RouteVisualizerProps> = ({ destinations, current
 
     // 2. Add Destinations Markers and Route Geometry
     destinations.forEach((dest, index) => {
-        // Only map if coordinates exist
-        if (dest.address.lat && dest.address.lng) {
+        // Only map if coordinates exist and are valid numbers
+        if (dest.address.lat != null && dest.address.lng != null && !isNaN(dest.address.lat)) {
             const isCompleted = dest.status === RouteStatus.COMPLETED;
             const color = isCompleted ? '#22c55e' : '#ef4444';
             const zIndex = isCompleted ? 500 : 800;
@@ -187,12 +220,12 @@ const RouteVisualizer: React.FC<RouteVisualizerProps> = ({ destinations, current
         routeLayerRef.current.addLayer(polyline);
     }
 
-    // Fit Bounds only when new points are added or strictly needed
-    // This prevents jarring movement if user is panning, but ensures new points are seen
-    // Simple logic: if points > 0, fit bounds.
+    // Fit Bounds Logic
+    // Only fit bounds if we have points AND (it's the first load OR we just added points)
     if (points.length > 0) {
         const latlngs = points.map(p => [p.lat, p.lng]);
         const bounds = L.latLngBounds(latlngs);
+        // Padding garante que os marcadores não fiquem colados na borda
         mapInstanceRef.current.fitBounds(bounds, { padding: [80, 80], maxZoom: 16 });
     }
 
@@ -249,8 +282,8 @@ const RouteVisualizer: React.FC<RouteVisualizerProps> = ({ destinations, current
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 6.75V15m6-6v8.25m.503 3.498l4.875-2.437c.381-.19.622-.58.622-1.006V4.82c0-.836-.88-1.38-1.628-1.006l-3.869 1.934c-.317.159-.69.159-1.006 0L9.503 3.252a1.125 1.125 0 00-1.006 0L3.622 5.689C3.24 5.88 3 6.27 3 6.695V19.18c0 .836.88 1.38 1.628 1.006l3.869-1.934c.317-.159.69-.159 1.006 0l4.994 2.497c.317.158.69.158 1.006 0z" />
                         </svg>
                     </div>
-                    <h3 className="font-bold text-slate-800 text-lg mb-1">Mapa Pronto</h3>
-                    <p className="text-sm text-slate-500">Adicione um CEP ou permita o acesso à sua localização para visualizar a rota.</p>
+                    <h3 className="font-bold text-slate-800 text-lg mb-1">Mapa do Brasil</h3>
+                    <p className="text-sm text-slate-500">Adicione CEPs para traçar sua rota no território nacional.</p>
                 </div>
              </div>
         )}

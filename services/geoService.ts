@@ -29,21 +29,28 @@ export const fetchAddressByCep = async (cep: string): Promise<AddressData | null
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const fetchCoordinates = async (address: AddressData): Promise<{ lat: number; lng: number } | null> => {
-  // Limpeza inteligente do logradouro:
-  // ViaCEP retorna coisas como: "Rua Exemplo - de 1000 a 2000 - lado ímpar"
-  // O Nominatim se confunde com isso. Queremos apenas "Rua Exemplo".
-  // Usamos ' - ' (espaço hífen espaço) como separador seguro para não quebrar nomes de ruas compostos (ex: X-Men).
+  // Limpeza inteligente do logradouro para aumentar chances de match
   let cleanLogradouro = address.logradouro.split(' - ')[0];
-  
-  // Remover parênteses se houver (ex: "Rua X (Antiga Rua Y)")
   cleanLogradouro = cleanLogradouro.split('(')[0].trim();
 
-  // Lista de estratégias de busca (Waterfall / Cascata)
-  // Prioridade: Precisão alta -> Precisão média
+  // Estratégia de Tentativas (Retry Strategy)
+  // O Nominatim (OSM) é sensível. Vamos tentar do mais específico para o mais genérico.
+  
   const queries = [
-    // 1. Busca Estruturada (Rua, Cidade, Estado) - Alta precisão
-    // Essa é a melhor forma pois evita falsos positivos em outras cidades
+    // 1. TENTATIVA POR CEP (Postalcode) - Prioridade Alta para garantir o pino
+    // Muitas vezes o nome da rua muda, mas o CEP geográfico é conhecido pelo OSM.
     {
+        type: 'cep',
+        params: new URLSearchParams({
+            postalcode: address.cep.replace('-', ''), // Remove hífen
+            country: 'Brazil',
+            format: 'json',
+            limit: '1'
+        })
+    },
+    // 2. Busca Estruturada (Rua, Cidade, Estado)
+    {
+        type: 'street_structured',
         params: new URLSearchParams({
             street: cleanLogradouro,
             city: address.localidade,
@@ -53,29 +60,22 @@ export const fetchCoordinates = async (address: AddressData): Promise<{ lat: num
             limit: '1'
         })
     },
-    // 2. Busca por CEP (Postalcode) - Alta precisão para localização aproximada da rua/quadra
-    // O OpenStreetMap (Nominatim) tem uma boa base de CEPs.
+    // 3. Busca Livre (Query string) - Rua + Cidade
     {
+        type: 'street_query',
         params: new URLSearchParams({
-            postalcode: address.cep,
-            country: 'Brazil',
+            q: `${cleanLogradouro}, ${address.localidade}, ${address.uf}`,
             format: 'json',
             limit: '1'
         })
     },
-    // 3. Busca Livre (Query string) - Rua + Cidade + UF
-    // Fallback padrão caso a busca estruturada falhe por grafia
+    // 4. Último recurso: Centro da Cidade (Garante que não retorna null)
     {
+        type: 'city_fallback',
         params: new URLSearchParams({
-            q: `${cleanLogradouro}, ${address.localidade}, ${address.uf}, Brazil`,
-            format: 'json',
-            limit: '1'
-        })
-    },
-    // 4. Busca por Bairro (Último recurso para garantir que o alfinete apareça na cidade certa)
-    {
-        params: new URLSearchParams({
-             q: `${address.bairro}, ${address.localidade}, ${address.uf}, Brazil`,
+             city: address.localidade,
+             state: address.uf,
+             country: 'Brazil',
              format: 'json',
              limit: '1'
         })
@@ -84,12 +84,13 @@ export const fetchCoordinates = async (address: AddressData): Promise<{ lat: num
 
   for (const query of queries) {
       try {
-        await delay(1000); // Respeitar limite de taxa (Rate Limit) do Nominatim para não ser bloqueado
+        // Delay para evitar Rate Limiting (Erro 429) se adicionarmos muitos CEPs rápido
+        await delay(800); 
         
         const url = `https://nominatim.openstreetmap.org/search?${query.params.toString()}`;
         const response = await fetch(url, {
             headers: {
-                'User-Agent': 'RotaInteligenteApp/1.0',
+                'User-Agent': 'RotaInteligenteApp/2.0', // User-agent único é obrigatório no OSM
                 'Accept-Language': 'pt-BR'
             }
         });
@@ -97,17 +98,21 @@ export const fetchCoordinates = async (address: AddressData): Promise<{ lat: num
         const data = await response.json();
 
         if (data && data.length > 0) {
-            return {
-                lat: parseFloat(data[0].lat),
-                lng: parseFloat(data[0].lon),
-            };
+            const lat = parseFloat(data[0].lat);
+            const lng = parseFloat(data[0].lon);
+            
+            // Validação básica de coordenadas (Brasil fica aprox entre Lat +5 e -33, Lng -34 e -74)
+            // Isso evita que um erro de geocoding jogue o pino na Europa
+            if (!isNaN(lat) && !isNaN(lng)) {
+                return { lat, lng };
+            }
         }
     } catch (error) {
-        console.warn("Erro na tentativa de geocodificação:", error);
+        console.warn(`Erro na tentativa de geocodificação (${query.type}):`, error);
     }
   }
 
-  // Se todas as tentativas falharem
+  // Se absolutamente tudo falhar, retorna null e o App.tsx trata
   return null;
 };
 
@@ -127,7 +132,9 @@ export const getCurrentPosition = (): Promise<{ lat: number; lng: number }> => {
           reject(error);
         },
         {
-           enableHighAccuracy: true
+           enableHighAccuracy: true,
+           timeout: 10000,
+           maximumAge: 0
         }
       );
     }
