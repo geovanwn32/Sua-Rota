@@ -1,5 +1,5 @@
 # wrangler.toml
-name = "rota"
+name = "rotainteligente"
 compatibility_date = "2025-11-27"
 
 [assets]
